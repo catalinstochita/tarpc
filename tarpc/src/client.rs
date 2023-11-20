@@ -24,6 +24,7 @@ use std::{
         Arc,
     },
 };
+use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tracing::Span;
 
@@ -52,32 +53,47 @@ impl Default for Config {
 
 /// A channel and dispatch pair. The dispatch drives the sending and receiving of requests
 /// and must be polled continuously or spawned.
-pub struct NewClient<C, D> {
+pub struct NewClient<C, D, F>
+    where F: FnOnce() + Send + 'static
+{
     /// The new client.
     pub client: C,
     /// The client's dispatch.
     pub dispatch: D,
+    /// Shutdown callback
+    pub shutdown_callback: Arc<Mutex<Option<F>>>
 }
 
-impl<C, D, E> NewClient<C, D>
+impl<C, D, E, F> NewClient<C, D, F>
 where
     D: Future<Output = Result<(), E>> + Send + 'static,
     E: std::error::Error + Send + Sync + 'static,
+    F: FnOnce() + Send + 'static
 {
     /// Helper method to spawn the dispatch on the default executor.
     #[cfg(feature = "tokio1")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tokio1")))]
     pub fn spawn(self) -> C {
+        let shutdown_callback = self.shutdown_callback.clone();
         let dispatch = self.dispatch.unwrap_or_else(move |e| {
             let e = anyhow::Error::new(e);
             tracing::warn!("Connection broken: {:?}", e);
+            call_shutdown(shutdown_callback);
         });
         tokio::spawn(dispatch);
         self.client
     }
 }
 
-impl<C, D> fmt::Debug for NewClient<C, D> {
+///Shutdown function, called only once
+pub fn call_shutdown<F:FnOnce() + Send + 'static>(shutdown_callback:Arc<Mutex<Option<F>>>){
+    let mut shutdown = shutdown_callback.lock().unwrap();
+    if let Some(f) = shutdown.take(){
+        f();
+    }
+}
+
+impl<C, D, F:FnOnce() + Send + 'static> fmt::Debug for NewClient<C, D, F> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(fmt, "NewClient")
     }
@@ -231,12 +247,14 @@ impl<Resp> Drop for ResponseGuard<'_, Resp> {
 
 /// Returns a channel and dispatcher that manages the lifecycle of requests initiated by the
 /// channel.
-pub fn new<Req, Resp, C>(
+pub fn new<Req, Resp, C, F>(
     config: Config,
     transport: C,
-) -> NewClient<Channel<Req, Resp>, RequestDispatch<Req, Resp, C>>
+    shutdown_callback: F
+) -> NewClient<Channel<Req, Resp>, RequestDispatch<Req, Resp, C>, F>
 where
     C: Transport<ClientMessage<Req>, Response<Resp>>,
+    F: FnOnce() + Send + 'static
 {
     let (to_dispatch, pending_requests) = mpsc::channel(config.pending_request_buffer);
     let (cancellation, canceled_requests) = cancellations();
@@ -254,6 +272,7 @@ where
             in_flight_requests: InFlightRequests::default(),
             pending_requests,
         },
+        shutdown_callback:Arc::new(Mutex::new(Some(shutdown_callback))),
     }
 }
 

@@ -12,9 +12,10 @@ use rand::{
 };
 use service::{init_tracing, World};
 use std::{
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     time::Duration,
 };
+use std::net::Ipv4Addr;
 use tarpc::{
     context,
     server::{self, incoming::Incoming, Channel},
@@ -49,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
     init_tracing("Tarpc Example Server")?;
 
-    let server_addr = (IpAddr::V6(Ipv6Addr::LOCALHOST), flags.port);
+    let server_addr = (IpAddr::V4(Ipv4Addr::LOCALHOST), flags.port);
 
     // JSON transport is provided by the json_transport tarpc module. It makes it easy
     // to start up a serde-powered json serialization strategy over TCP.
@@ -66,7 +67,9 @@ async fn main() -> anyhow::Result<()> {
         // the generated World trait.
         .map(|channel| {
             let server = HelloServer(channel.transport().peer_addr().unwrap());
-            channel.execute(server.serve())
+            channel.execute(server.serve(),||{
+                println!("Client was shutdown");
+            })
         })
         // Max 10 channels.
         .buffer_unordered(10)

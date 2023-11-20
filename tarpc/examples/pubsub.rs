@@ -117,7 +117,7 @@ impl Subscriber {
                 ))
             }
         };
-        let (handler, abort_handle) = future::abortable(handler.execute(subscriber.serve()));
+        let (handler, abort_handle) = future::abortable(handler.execute(subscriber.serve(),||{}));
         tokio::spawn(async move {
             match handler.await {
                 Ok(()) | Err(future::Aborted) => info!(?local_addr, "subscriber shutdown."),
@@ -161,7 +161,7 @@ impl Publisher {
             info!(publisher.peer_addr = ?publisher.peer_addr(), "publisher connected.");
 
             server::BaseChannel::with_defaults(publisher)
-                .execute(self.serve())
+                .execute(self.serve(),||{} )
                 .await
         });
 
@@ -182,7 +182,8 @@ impl Publisher {
                 let tarpc::client::NewClient {
                     client: subscriber,
                     dispatch,
-                } = subscriber::SubscriberClient::new(client::Config::default(), conn);
+                    shutdown_callback:_
+                } = subscriber::SubscriberClient::new(client::Config::default(), conn,||{});
                 let (ready_tx, ready) = oneshot::channel();
                 self.clone()
                     .start_subscriber_gc(subscriber_addr, dispatch, ready);
@@ -322,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
     let publisher = publisher::PublisherClient::new(
         client::Config::default(),
         tcp::connect(addrs.publisher, Json::default).await?,
+        ||{}
     )
     .spawn();
 

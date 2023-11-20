@@ -44,10 +44,10 @@ async fn sequential() -> anyhow::Result<()> {
     tokio::spawn(
         BaseChannel::new(server::Config::default(), rx)
             .requests()
-            .execute(Server.serve()),
+            .execute(Server.serve(),||{}),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx,||{}).spawn();
 
     assert_matches!(client.add(context::current(), 1, 2).await, Ok(3));
     assert_matches!(
@@ -86,7 +86,7 @@ async fn dropped_channel_aborts_in_flight_requests() -> anyhow::Result<()> {
     // Set up a client that initiates a long-lived request.
     // The request will complete in error when the server drops the connection.
     tokio::spawn(async move {
-        let client = LoopClient::new(client::Config::default(), tx).spawn();
+        let client = LoopClient::new(client::Config::default(), tx,||{}).spawn();
 
         let mut ctx = context::current();
         ctx.deadline = SystemTime::now() + Duration::from_secs(60 * 60);
@@ -125,7 +125,7 @@ async fn serde_tcp() -> anyhow::Result<()> {
     );
 
     let transport = serde_transport::tcp::connect(addr, Json::default).await?;
-    let client = ServiceClient::new(client::Config::default(), transport).spawn();
+    let client = ServiceClient::new(client::Config::default(), transport,||{}).spawn();
 
     assert_matches!(client.add(context::current(), 1, 2).await, Ok(3));
     assert_matches!(
@@ -178,7 +178,7 @@ async fn concurrent() -> anyhow::Result<()> {
             .execute(Server.serve()),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx,||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -202,7 +202,7 @@ async fn concurrent_join() -> anyhow::Result<()> {
             .execute(Server.serve()),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx,||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -227,7 +227,7 @@ async fn concurrent_join_all() -> anyhow::Result<()> {
             .execute(Server.serve()),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx,||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -267,7 +267,7 @@ async fn counter() -> anyhow::Result<()> {
         }
     });
 
-    let client = CounterClient::new(client::Config::default(), tx).spawn();
+    let client = CounterClient::new(client::Config::default(), tx,||{}).spawn();
     assert_matches!(client.count(context::current()).await, Ok(1));
     assert_matches!(client.count(context::current()).await, Ok(2));
 

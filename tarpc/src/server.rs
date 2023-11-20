@@ -325,15 +325,16 @@ where
     /// default executor.
     #[cfg(feature = "tokio1")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tokio1")))]
-    fn execute<S>(self, serve: S) -> self::tokio::TokioChannelExecutor<Requests<Self>, S>
+    fn execute<S,F>(self, serve: S, shutdown_callback: F) -> self::tokio::TokioChannelExecutor<Requests<Self>, S,F>
     where
         Self: Sized,
         S: Serve<Self::Req, Resp = Self::Resp> + Send + 'static,
         S::Fut: Send,
         Self::Req: Send + 'static,
         Self::Resp: Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
-        self.requests().execute(serve)
+        self.requests().execute(serve,shutdown_callback)
     }
 }
 
