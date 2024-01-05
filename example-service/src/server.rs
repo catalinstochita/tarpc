@@ -12,10 +12,9 @@ use rand::{
 };
 use service::{init_tracing, World};
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
-use std::net::Ipv4Addr;
 use tarpc::{
     context,
     server::{self, incoming::Incoming, Channel},
@@ -35,7 +34,6 @@ struct Flags {
 #[derive(Clone)]
 struct HelloServer(SocketAddr);
 
-#[tarpc::server]
 impl World for HelloServer {
     async fn hello(self, _: context::Context, name: String) -> String {
         let sleep_time =
@@ -43,6 +41,10 @@ impl World for HelloServer {
         time::sleep(sleep_time).await;
         format!("Hello, {name}! You are connected from {}", self.0)
     }
+}
+
+async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
+    tokio::spawn(fut);
 }
 
 #[tokio::main]
@@ -69,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
             let server = HelloServer(channel.transport().peer_addr().unwrap());
             channel.execute(server.serve(),||{
                 println!("Client was shutdown");
-            })
+            }).for_each(spawn)
         })
         // Max 10 channels.
         .buffer_unordered(10)
