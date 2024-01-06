@@ -578,14 +578,14 @@ where
                 (read, Poll::Ready(None)) => {
                     if self.in_flight_requests.is_empty() {
                         tracing::info!("Shutdown: write half closed, and no requests in flight.");
-                        (self.shutdown_callback)();
+                        // (self.shutdown_callback)();
                         return Poll::Ready(Ok(()));
                     }
                     tracing::info!(
                         "Shutdown: write half closed, and {} requests in flight.",
                         self.in_flight_requests().len()
                     );
-                    (self.shutdown_callback)();
+                    // (self.shutdown_callback)();
                     match read {
                         Poll::Ready(Some(())) => continue,
                         _ => return Poll::Pending,
