@@ -555,10 +555,7 @@ where
     fn execute<S,F>(self, serve: S, shutdown_callback: F) -> impl Stream<Item = impl Future<Output = ()>>
     where
         Self: Sized,
-        S: Serve<Self::Req, Resp = Self::Resp> + Send + 'static,
-        S::Fut: Send,
-        Self::Req: Send + 'static,
-        Self::Resp: Send + 'static,
+        S: Serve<Req = Self::Req, Resp = Self::Resp> + Clone,
         F: FnOnce() + Send + 'static,
     {
         self.requests().execute(serve,shutdown_callback)
@@ -902,9 +899,10 @@ where
     ///     assert_eq!(client.call(context::current(), "AddOne", 1).await.unwrap(), 2);
     /// }
     /// ```
-    pub fn execute<S>(self, serve: S) -> impl Stream<Item = impl Future<Output = ()>>
+    pub fn execute<S,F>(self, serve: S, shutdown_callback: F) -> impl Stream<Item = impl Future<Output = ()>>
     where
         S: Serve<Req = C::Req, Resp = C::Resp> + Clone,
+        F: FnOnce() + Send + 'static,
     {
         self.take_while(|result| {
             if let Err(e) = result {

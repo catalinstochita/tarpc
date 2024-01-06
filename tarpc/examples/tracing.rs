@@ -121,7 +121,7 @@ where
     let stub = load_balance::RoundRobin::new(
         backends
             .into_iter()
-            .map(|transport| tarpc::client::new(client::Config::default(), transport).spawn())
+            .map(|transport| tarpc::client::new(client::Config::default(), transport,||{}).spawn())
             .collect(),
     );
     let stub = retry::Retry::new(stub, |resp, attempts| {
@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     let add_server = add_listener1
         .chain(add_listener2)
         .map(BaseChannel::with_defaults);
-    tokio::spawn(spawn_incoming(add_server.execute(server)));
+    tokio::spawn(spawn_incoming(add_server.execute(server,||{})));
 
     let add_client = add::AddClient::from(make_stub([
         tarpc::serde_transport::tcp::connect(addr1, Json::default).await?,
@@ -173,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = double_listener.get_ref().local_addr();
     let double_server = double_listener.map(BaseChannel::with_defaults).take(1);
     let server = DoubleServer { add_client }.serve();
-    tokio::spawn(spawn_incoming(double_server.execute(server)));
+    tokio::spawn(spawn_incoming(double_server.execute(server,||{})));
 
     let to_double_server = tarpc::serde_transport::tcp::connect(addr, Json::default).await?;
     let double_client =

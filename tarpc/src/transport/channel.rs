@@ -198,7 +198,7 @@ mod tests {
                             format!("{request:?} is not an int"),
                         )
                     })
-                }))
+                }),||{})
                 .for_each(|channel| async move {
                     tokio::spawn(channel.for_each(|response| response));
                 }),

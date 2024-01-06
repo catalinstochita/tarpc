@@ -34,7 +34,7 @@ impl Service for Server {
 #[tokio::test]
 async fn sequential() {
     let (tx, rx) = tarpc::transport::channel::unbounded();
-    let client = client::new(client::Config::default(), tx).spawn();
+    let client = client::new(client::Config::default(), tx,||{}).spawn();
     let channel = BaseChannel::with_defaults(rx);
     tokio::spawn(
         channel
@@ -110,7 +110,7 @@ async fn serde_tcp() -> anyhow::Result<()> {
             .take(1)
             .filter_map(|r| async { r.ok() })
             .map(BaseChannel::with_defaults)
-            .execute(Server.serve())
+            .execute(Server.serve(),||{})
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
@@ -142,13 +142,13 @@ async fn serde_uds() -> anyhow::Result<()> {
             .take(1)
             .filter_map(|r| async { r.ok() })
             .map(BaseChannel::with_defaults)
-            .execute(Server.serve())
+            .execute(Server.serve(),||{})
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
     let transport = serde_transport::unix::connect(&sock, Json::default).await?;
-    let client = ServiceClient::new(client::Config::default(), transport).spawn();
+    let client = ServiceClient::new(client::Config::default(), transport,||{}).spawn();
 
     // Save results using socket so we can clean the socket even if our test assertions fail
     let res1 = client.add(context::current(), 1, 2).await;
@@ -168,7 +168,7 @@ async fn concurrent() -> anyhow::Result<()> {
     tokio::spawn(
         stream::once(ready(rx))
             .map(BaseChannel::with_defaults)
-            .execute(Server.serve())
+            .execute(Server.serve(),||{})
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
@@ -194,7 +194,7 @@ async fn concurrent_join() -> anyhow::Result<()> {
     tokio::spawn(
         stream::once(ready(rx))
             .map(BaseChannel::with_defaults)
-            .execute(Server.serve())
+            .execute(Server.serve(),||{})
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
@@ -225,7 +225,7 @@ async fn concurrent_join_all() -> anyhow::Result<()> {
     let (tx, rx) = channel::unbounded();
     tokio::spawn(
         BaseChannel::with_defaults(rx)
-            .execute(Server.serve())
+            .execute(Server.serve(),||{})
             .for_each(spawn),
     );
 

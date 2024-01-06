@@ -27,14 +27,16 @@ where
 
     /// Returns a stream of channels in execution. Each channel in execution is a stream of
     /// futures, where each future is an in-flight request being rsponded to.
-    fn execute<S>(
+    fn execute<S,F>(
         self,
         serve: S,
+        shutdown_callback: F,
     ) -> impl Stream<Item = impl Stream<Item = impl Future<Output = ()>>>
     where
         S: Serve<Req = C::Req, Resp = C::Resp> + Clone,
+        F: FnOnce() + Send + 'static,
     {
-        self.map(move |channel| channel.execute(serve.clone()))
+        self.map(move |channel| channel.execute(serve.clone(),||{}))
     }
 }
 

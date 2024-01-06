@@ -44,7 +44,7 @@ async fn test_call() -> anyhow::Result<()> {
             .take(1)
             .filter_map(|r| async { r.ok() })
             .map(BaseChannel::with_defaults)
-            .execute(ColorServer.serve())
+            .execute(ColorServer.serve(),||{})
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );

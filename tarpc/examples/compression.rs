@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let transport = tcp::connect(addr, Bincode::default).await?;
-    let client = WorldClient::new(client::Config::default(), add_compression(transport)).spawn();
+    let client = WorldClient::new(client::Config::default(), add_compression(transport),||{}).spawn();
 
     println!(
         "{}",
