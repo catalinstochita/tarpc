@@ -131,6 +131,10 @@ where
     fn transport(&self) -> &Self::Transport {
         self.inner.transport()
     }
+
+    fn shutdown_callback(&self) {
+        self.inner.shutdown_callback();
+    }
 }
 
 /// An [`Incoming`](crate::server::incoming::Incoming) stream of channels that enforce limits on
@@ -309,6 +313,10 @@ mod tests {
             }
             fn transport(&self) -> &() {
                 &()
+            }
+
+            fn shutdown_callback(&self) {
+                unimplemented!()
             }
         }
     }

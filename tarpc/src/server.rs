@@ -58,11 +58,11 @@ impl Default for Config {
 
 impl Config {
     /// Returns a channel backed by `transport` and configured with `self`.
-    pub fn channel<Req, Resp, T>(self, transport: T) -> BaseChannel<Req, Resp, T>
+    pub fn channel<Req, Resp, T>(self, transport: T, shutdown_callback: fn() -> ()) -> BaseChannel<Req, Resp, T>
     where
         T: Transport<Response<Resp>, ClientMessage<Req>>,
     {
-        BaseChannel::new(self, transport)
+        BaseChannel::new(self, transport, shutdown_callback)
     }
 }
 
@@ -293,6 +293,8 @@ pub struct BaseChannel<Req, Resp, T> {
     in_flight_requests: InFlightRequests,
     /// Types the request and response.
     ghost: PhantomData<(fn() -> Req, fn(Resp))>,
+    /// Shutdown callback
+    shutdown_callback: fn() -> (),
 }
 
 impl<Req, Resp, T> BaseChannel<Req, Resp, T>
@@ -300,7 +302,7 @@ where
     T: Transport<Response<Resp>, ClientMessage<Req>>,
 {
     /// Creates a new channel backed by `transport` and configured with `config`.
-    pub fn new(config: Config, transport: T) -> Self {
+    pub fn new(config: Config, transport: T, shutdown_callback: fn() -> ()) -> Self {
         let (request_cancellation, canceled_requests) = cancellations();
         BaseChannel {
             config,
@@ -309,12 +311,13 @@ where
             request_cancellation,
             in_flight_requests: InFlightRequests::default(),
             ghost: PhantomData,
+            shutdown_callback,
         }
     }
 
     /// Creates a new channel backed by `transport` and configured with the defaults.
-    pub fn with_defaults(transport: T) -> Self {
-        Self::new(Config::default(), transport)
+    pub fn with_defaults(transport: T, shutdown_callback: fn() -> ()) -> Self {
+        Self::new(Config::default(), transport, shutdown_callback)
     }
 
     /// Returns the inner transport over which messages are sent and received.
@@ -455,6 +458,9 @@ where
 
     /// Returns the transport underlying the channel.
     fn transport(&self) -> &Self::Transport;
+
+    /// Calls shutdown callback
+    fn shutdown_callback(&self);
 
     /// Caps the number of concurrent requests to `limit`. An error will be returned for requests
     /// over the concurrency limit.
@@ -740,6 +746,10 @@ where
     fn transport(&self) -> &Self::Transport {
         self.get_ref()
     }
+
+    fn shutdown_callback(&self) {
+        (self.shutdown_callback)();
+    }
 }
 
 /// A stream of requests coming over a channel. `Requests` also drives the sending of responses, so
@@ -831,6 +841,7 @@ where
                 // fully flushed. So, if the read half is closed and there are no in-flight
                 // requests, then we can close the write half.
                 if read_half_closed && self.channel.in_flight_requests() == 0 {
+                    self.channel.shutdown_callback();
                     Poll::Ready(None)
                 } else {
                     Poll::Pending
@@ -1124,7 +1135,7 @@ mod tests {
         UnboundedChannel<Response<Resp>, ClientMessage<Req>>,
     ) {
         let (tx, rx) = crate::transport::channel::unbounded();
-        (Box::pin(BaseChannel::new(Config::default(), rx)), tx)
+        (Box::pin(BaseChannel::new(Config::default(), rx,||{})), tx)
     }
 
     fn test_requests<Req, Resp>() -> (
@@ -1139,7 +1150,7 @@ mod tests {
     ) {
         let (tx, rx) = crate::transport::channel::unbounded();
         (
-            Box::pin(BaseChannel::new(Config::default(), rx).requests()),
+            Box::pin(BaseChannel::new(Config::default(), rx,||{}).requests()),
             tx,
         )
     }
@@ -1161,7 +1172,7 @@ mod tests {
         let config = Config {
             pending_response_buffer: capacity + 1,
         };
-        (Box::pin(BaseChannel::new(config, rx).requests()), tx)
+        (Box::pin(BaseChannel::new(config, rx,||{}).requests()), tx)
     }
 
     fn fake_request<Req>(req: Req) -> ClientMessage<Req> {

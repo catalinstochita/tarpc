@@ -190,7 +190,7 @@ mod tests {
         let (client_channel, server_channel) = transport::channel::unbounded();
         tokio::spawn(
             stream::once(future::ready(server_channel))
-                .map(BaseChannel::with_defaults)
+                .map(|transport|BaseChannel::with_defaults(transport,||{}))
                 .execute(serve(|_ctx, request: String| async move {
                     request.parse::<u64>().map_err(|_| {
                         ServerError::new(
@@ -204,7 +204,7 @@ mod tests {
                 }),
         );
 
-        let client = client::new(client::Config::default(), client_channel).spawn();
+        let client = client::new(client::Config::default(), client_channel,||{}).spawn();
 
         let response1 = client.call(context::current(), "", "123".into()).await;
         let response2 = client.call(context::current(), "", "abc".into()).await;

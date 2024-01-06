@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
             let transport = transport::new(framed, Bincode::default());
 
-            let fut = BaseChannel::with_defaults(transport)
+            let fut = BaseChannel::with_defaults(transport,||{})
                 .execute(Service.serve())
                 .for_each(spawn);
             tokio::spawn(fut);
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     let stream = connector.connect(domain, stream).await?;
 
     let transport = transport::new(codec_builder.new_framed(stream), Bincode::default());
-    let answer = PingServiceClient::new(Default::default(), transport)
+    let answer = PingServiceClient::new(Default::default(), transport, ||{})
         .spawn()
         .ping(tarpc::context::current())
         .await?;

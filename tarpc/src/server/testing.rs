@@ -25,6 +25,7 @@ pub(crate) struct FakeChannel<In, Out> {
     pub in_flight_requests: super::in_flight_requests::InFlightRequests,
     pub request_cancellation: RequestCancellation,
     pub canceled_requests: CanceledRequests,
+    pub shutdown_callback: fn() -> (),
 }
 
 impl<In, Out> Stream for FakeChannel<In, Out>
@@ -84,6 +85,10 @@ where
     fn transport(&self) -> &() {
         &()
     }
+
+    fn shutdown_callback(&self) {
+        (self.shutdown_callback)();
+    }
 }
 
 impl<Req, Resp> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>> {
@@ -120,6 +125,7 @@ impl FakeChannel<(), ()> {
             in_flight_requests: Default::default(),
             request_cancellation,
             canceled_requests,
+            shutdown_callback:||{},
         }
     }
 }

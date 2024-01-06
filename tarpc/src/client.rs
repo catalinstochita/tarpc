@@ -235,6 +235,7 @@ impl<Resp> Drop for ResponseGuard<'_, Resp> {
 pub fn new<Req, Resp, C>(
     config: Config,
     transport: C,
+    shutdown_callback: fn() -> (),
 ) -> NewClient<Channel<Req, Resp>, RequestDispatch<Req, Resp, C>>
 where
     C: Transport<ClientMessage<Req>, Response<Resp>>,
@@ -254,6 +255,7 @@ where
             transport: transport.fuse(),
             in_flight_requests: InFlightRequests::default(),
             pending_requests,
+            shutdown_callback,
         },
     }
 }
@@ -275,6 +277,7 @@ pub struct RequestDispatch<Req, Resp, C> {
     in_flight_requests: InFlightRequests<Result<Resp, RpcError>>,
     /// Configures limits to prevent unlimited resource usage.
     config: Config,
+    shutdown_callback: fn() -> (),
 }
 
 impl<Req, Resp, C> RequestDispatch<Req, Resp, C>
@@ -569,17 +572,20 @@ where
             match (self.as_mut().pump_read(cx)?, self.as_mut().pump_write(cx)?) {
                 (Poll::Ready(None), _) => {
                     tracing::info!("Shutdown: read half closed, so shutting down.");
+                    (self.shutdown_callback)();
                     return Poll::Ready(Ok(()));
                 }
                 (read, Poll::Ready(None)) => {
                     if self.in_flight_requests.is_empty() {
                         tracing::info!("Shutdown: write half closed, and no requests in flight.");
+                        (self.shutdown_callback)();
                         return Poll::Ready(Ok(()));
                     }
                     tracing::info!(
                         "Shutdown: write half closed, and {} requests in flight.",
                         self.in_flight_requests().len()
                     );
+                    (self.shutdown_callback)();
                     match read {
                         Poll::Ready(Some(())) => continue,
                         _ => return Poll::Pending,
@@ -894,6 +900,7 @@ mod tests {
             canceled_requests,
             in_flight_requests: InFlightRequests::default(),
             config: Config::default(),
+            shutdown_callback: ||{},
         });
         let channel = Channel {
             to_dispatch,
@@ -989,6 +996,7 @@ mod tests {
             canceled_requests,
             in_flight_requests: InFlightRequests::default(),
             config: Config::default(),
+            shutdown_callback: ||{},
         };
 
         let channel = Channel {

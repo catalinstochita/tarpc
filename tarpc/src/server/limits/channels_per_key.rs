@@ -119,6 +119,10 @@ where
     fn transport(&self) -> &Self::Transport {
         self.inner.transport()
     }
+
+    fn shutdown_callback(&self) {
+        self.inner.shutdown_callback();
+    }
 }
 
 impl<C, K> TrackedChannel<C, K> {

@@ -34,8 +34,8 @@ impl Service for Server {
 #[tokio::test]
 async fn sequential() {
     let (tx, rx) = tarpc::transport::channel::unbounded();
-    let client = client::new(client::Config::default(), tx).spawn();
-    let channel = BaseChannel::with_defaults(rx);
+    let client = client::new(client::Config::default(), tx, ||{}).spawn();
+    let channel = BaseChannel::with_defaults(rx,||{});
     tokio::spawn(
         channel
             .execute(tarpc::server::serve(|_, i| async move { Ok(i + 1) }))
@@ -75,14 +75,14 @@ async fn dropped_channel_aborts_in_flight_requests() -> anyhow::Result<()> {
     // Set up a client that initiates a long-lived request.
     // The request will complete in error when the server drops the connection.
     tokio::spawn(async move {
-        let client = LoopClient::new(client::Config::default(), tx).spawn();
+        let client = LoopClient::new(client::Config::default(), tx, ||{}).spawn();
 
         let mut ctx = context::current();
         ctx.deadline = SystemTime::now() + Duration::from_secs(60 * 60);
         let _ = client.r#loop(ctx).await;
     });
 
-    let mut requests = BaseChannel::with_defaults(rx).requests();
+    let mut requests = BaseChannel::with_defaults(rx,||{}).requests();
     // Reading a request should trigger the request being registered with BaseChannel.
     let first_request = requests.next().await.unwrap()?;
     // Dropping the channel should trigger cleanup of outstanding requests.
@@ -109,14 +109,14 @@ async fn serde_tcp() -> anyhow::Result<()> {
         transport
             .take(1)
             .filter_map(|r| async { r.ok() })
-            .map(BaseChannel::with_defaults)
+            .map(|transport|BaseChannel::with_defaults(transport,||{}))
             .execute(Server.serve())
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
     let transport = serde_transport::tcp::connect(addr, Json::default).await?;
-    let client = ServiceClient::new(client::Config::default(), transport).spawn();
+    let client = ServiceClient::new(client::Config::default(), transport, ||{}).spawn();
 
     assert_matches!(client.add(context::current(), 1, 2).await, Ok(3));
     assert_matches!(
@@ -141,14 +141,14 @@ async fn serde_uds() -> anyhow::Result<()> {
         transport
             .take(1)
             .filter_map(|r| async { r.ok() })
-            .map(BaseChannel::with_defaults)
+            .map(|transport|BaseChannel::with_defaults(transport,||{}))
             .execute(Server.serve())
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
     let transport = serde_transport::unix::connect(&sock, Json::default).await?;
-    let client = ServiceClient::new(client::Config::default(), transport).spawn();
+    let client = ServiceClient::new(client::Config::default(), transport, ||{}).spawn();
 
     // Save results using socket so we can clean the socket even if our test assertions fail
     let res1 = client.add(context::current(), 1, 2).await;
@@ -167,13 +167,13 @@ async fn concurrent() -> anyhow::Result<()> {
     let (tx, rx) = channel::unbounded();
     tokio::spawn(
         stream::once(ready(rx))
-            .map(BaseChannel::with_defaults)
+            .map(|transport|BaseChannel::with_defaults(transport,||{}))
             .execute(Server.serve())
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx, ||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -193,13 +193,13 @@ async fn concurrent_join() -> anyhow::Result<()> {
     let (tx, rx) = channel::unbounded();
     tokio::spawn(
         stream::once(ready(rx))
-            .map(BaseChannel::with_defaults)
+            .map(|transport|BaseChannel::with_defaults(transport,||{}))
             .execute(Server.serve())
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx, ||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -224,12 +224,12 @@ async fn concurrent_join_all() -> anyhow::Result<()> {
 
     let (tx, rx) = channel::unbounded();
     tokio::spawn(
-        BaseChannel::with_defaults(rx)
+        BaseChannel::with_defaults(rx,||{})
             .execute(Server.serve())
             .for_each(spawn),
     );
 
-    let client = ServiceClient::new(client::Config::default(), tx).spawn();
+    let client = ServiceClient::new(client::Config::default(), tx, ||{}).spawn();
 
     let req1 = client.add(context::current(), 1, 2);
     let req2 = client.add(context::current(), 3, 4);
@@ -259,7 +259,7 @@ async fn counter() -> anyhow::Result<()> {
 
     let (tx, rx) = channel::unbounded();
     tokio::spawn(async {
-        let mut requests = BaseChannel::with_defaults(rx).requests();
+        let mut requests = BaseChannel::with_defaults(rx,||{}).requests();
         let mut counter = CountService(0);
 
         while let Some(Ok(request)) = requests.next().await {
@@ -267,7 +267,7 @@ async fn counter() -> anyhow::Result<()> {
         }
     });
 
-    let client = CounterClient::new(client::Config::default(), tx).spawn();
+    let client = CounterClient::new(client::Config::default(), tx, ||{}).spawn();
     assert_matches!(client.count(context::current()).await, Ok(1));
     assert_matches!(client.count(context::current()).await, Ok(2));
 
