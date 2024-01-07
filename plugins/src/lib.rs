@@ -522,15 +522,16 @@ impl<'a> ServiceGenerator<'a> {
         quote! {
             impl #client_ident {
                 /// Returns a new client stub that sends requests over the given transport.
-                #vis fn new<T>(config: tarpc::client::Config, transport: T, shutdown_callback: fn() -> ())
+                #vis fn new<T,F>(config: tarpc::client::Config, transport: T, shutdown_callback: Option<F>)
                     -> tarpc::client::NewClient<
                         Self,
-                        tarpc::client::RequestDispatch<#request_ident, #response_ident, T>
+                        tarpc::client::RequestDispatch<#request_ident, #response_ident, T, F>
                     >
                 where
-                    T: tarpc::Transport<tarpc::ClientMessage<#request_ident>, tarpc::Response<#response_ident>>
+                    T: tarpc::Transport<tarpc::ClientMessage<#request_ident>, tarpc::Response<#response_ident>>,
+                    F: FnOnce() -> () + Send + 'static,
                 {
-                    let new_client = tarpc::client::new(config, transport, shutdown_callback);
+                    let new_client = tarpc::client::new(config, transport, std::sync::Arc::new(std::sync::Mutex::new(shutdown_callback)));
                     tarpc::client::NewClient {
                         client: #client_ident(new_client.client),
                         dispatch: new_client.dispatch,

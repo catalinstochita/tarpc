@@ -43,14 +43,15 @@ async fn test_call() -> anyhow::Result<()> {
         transport
             .take(1)
             .filter_map(|r| async { r.ok() })
-            .map(|transport|BaseChannel::with_defaults(transport,||{}))
+            .map(|transport| BaseChannel::with_defaults(transport, Some(|| {})))
             .execute(ColorServer.serve())
             .map(|channel| channel.for_each(spawn))
             .for_each(spawn),
     );
 
     let transport = serde_transport::tcp::connect(addr, Json::default).await?;
-    let client = ColorProtocolClient::new(client::Config::default(), transport,||{}).spawn();
+    let client =
+        ColorProtocolClient::new(client::Config::default(), transport, Some(|| {})).spawn();
 
     let color = client
         .get_opposite_color(context::current(), TestData::White)

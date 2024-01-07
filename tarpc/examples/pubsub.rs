@@ -98,14 +98,18 @@ impl Drop for SubscriberHandle {
 }
 
 impl Subscriber {
-    async fn connect(
+    async fn connect<F>(
         publisher_addr: impl ToSocketAddrs,
         topics: Vec<String>,
-        shutdown_callback: fn() -> (),
-    ) -> anyhow::Result<SubscriberHandle> {
+        shutdown_callback: Option<F>,
+    ) -> anyhow::Result<SubscriberHandle>
+    where
+        F: FnOnce() -> () + Send + 'static,
+    {
         let publisher = tcp::connect(publisher_addr, Json::default).await?;
         let local_addr = publisher.local_addr()?;
-        let mut handler = server::BaseChannel::with_defaults(publisher,shutdown_callback).requests();
+        let mut handler =
+            server::BaseChannel::with_defaults(publisher, shutdown_callback).requests();
         let subscriber = Subscriber { local_addr, topics };
         // The first request is for the topics being subscribed to.
         match handler.next().await {
@@ -149,7 +153,10 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
 }
 
 impl Publisher {
-    async fn start(self,shutdown_callback: fn() -> ()) -> io::Result<PublisherAddrs> {
+    async fn start<F>(self, shutdown_callback: Option<F>) -> io::Result<PublisherAddrs>
+    where
+        F: FnOnce() -> () + Send + 'static,
+    {
         let mut connecting_publishers = tcp::listen("localhost:0", Json::default).await?;
 
         let publisher_addrs = PublisherAddrs {
@@ -165,7 +172,7 @@ impl Publisher {
             let publisher = connecting_publishers.next().await.unwrap().unwrap();
             info!(publisher.peer_addr = ?publisher.peer_addr(), "publisher connected.");
 
-            server::BaseChannel::with_defaults(publisher,shutdown_callback)
+            server::BaseChannel::with_defaults(publisher, shutdown_callback)
                 .execute(self.serve())
                 .for_each(spawn)
                 .await
@@ -189,7 +196,7 @@ impl Publisher {
                     client: subscriber,
                     dispatch,
                     ..
-                } = subscriber::SubscriberClient::new(client::Config::default(), conn, ||{});
+                } = subscriber::SubscriberClient::new(client::Config::default(), conn, Some(|| {}));
                 let (ready_tx, ready) = oneshot::channel();
                 self.clone()
                     .start_subscriber_gc(subscriber_addr, dispatch, ready);
@@ -310,27 +317,27 @@ async fn main() -> anyhow::Result<()> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         subscriptions: Arc::new(RwLock::new(HashMap::new())),
     }
-    .start(||{})
+    .start(Some(|| {}))
     .await?;
 
     let _subscriber0 = Subscriber::connect(
         addrs.subscriptions,
         vec!["calculus".into(), "cool shorts".into()],
-        ||{},
+        Some(|| {}),
     )
     .await?;
 
     let _subscriber1 = Subscriber::connect(
         addrs.subscriptions,
         vec!["cool shorts".into(), "history".into()],
-        ||{},
+        Some(|| {}),
     )
     .await?;
 
     let publisher = publisher::PublisherClient::new(
         client::Config::default(),
         tcp::connect(addrs.publisher, Json::default).await?,
-        ||{}
+        Some(|| {}),
     )
     .spawn();
 

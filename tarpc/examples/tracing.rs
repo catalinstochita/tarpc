@@ -9,6 +9,7 @@ use crate::{
     double::Double as DoubleService,
 };
 use futures::{future, prelude::*};
+use std::sync::Mutex;
 use std::{
     io,
     sync::{
@@ -108,9 +109,9 @@ where
     Ok((listener, addr))
 }
 
-fn make_stub<Req, Resp, const N: usize>(
+fn make_stub<Req, Resp, const N: usize, F>(
     backends: [impl Transport<ClientMessage<Arc<Req>>, Response<Resp>> + Send + Sync + 'static; N],
-    shutdown_callback: fn() -> (),
+    shutdown_callback: Option<F>,
 ) -> retry::Retry<
     impl Fn(&Result<Resp, RpcError>, u32) -> bool + Clone,
     load_balance::RoundRobin<client::Channel<Arc<Req>, Resp>>,
@@ -118,11 +119,20 @@ fn make_stub<Req, Resp, const N: usize>(
 where
     Req: Send + Sync + 'static,
     Resp: Send + Sync + 'static,
+    F: FnOnce() -> () + Send + 'static,
 {
+    let shutdown_callback = Arc::new(Mutex::new(shutdown_callback));
     let stub = load_balance::RoundRobin::new(
         backends
             .into_iter()
-            .map(|transport| tarpc::client::new(client::Config::default(), transport,shutdown_callback).spawn())
+            .map(|transport| {
+                tarpc::client::new(
+                    client::Config::default(),
+                    transport,
+                    shutdown_callback.clone(),
+                )
+                .spawn()
+            })
             .collect(),
     );
     let stub = retry::Retry::new(stub, |resp, attempts| {
@@ -160,25 +170,30 @@ async fn main() -> anyhow::Result<()> {
         .serving(AddServer.serve());
     let add_server = add_listener1
         .chain(add_listener2)
-        .map(|transport|BaseChannel::with_defaults(transport,||{}));
+        .map(|transport| BaseChannel::with_defaults(transport, Some(|| {})));
     tokio::spawn(spawn_incoming(add_server.execute(server)));
 
-    let add_client = add::AddClient::from(make_stub([
-        tarpc::serde_transport::tcp::connect(addr1, Json::default).await?,
-        tarpc::serde_transport::tcp::connect(addr2, Json::default).await?,
-    ], ||{}));
+    let add_client = add::AddClient::from(make_stub(
+        [
+            tarpc::serde_transport::tcp::connect(addr1, Json::default).await?,
+            tarpc::serde_transport::tcp::connect(addr2, Json::default).await?,
+        ],
+        Some(|| {}),
+    ));
 
     let double_listener = tarpc::serde_transport::tcp::listen("localhost:0", Json::default)
         .await?
         .filter_map(|r| future::ready(r.ok()));
     let addr = double_listener.get_ref().local_addr();
-    let double_server = double_listener.map(|transport|BaseChannel::with_defaults(transport,||{})).take(1);
+    let double_server = double_listener
+        .map(|transport| BaseChannel::with_defaults(transport, Some(|| {})))
+        .take(1);
     let server = DoubleServer { add_client }.serve();
     tokio::spawn(spawn_incoming(double_server.execute(server)));
 
     let to_double_server = tarpc::serde_transport::tcp::connect(addr, Json::default).await?;
     let double_client =
-        double::DoubleClient::new(client::Config::default(), to_double_server, ||{}).spawn();
+        double::DoubleClient::new(client::Config::default(), to_double_server, Some(|| {})).spawn();
 
     let ctx = context::current();
     for _ in 1..=5 {

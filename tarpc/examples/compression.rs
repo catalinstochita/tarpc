@@ -121,14 +121,19 @@ async fn main() -> anyhow::Result<()> {
     let addr = incoming.local_addr();
     tokio::spawn(async move {
         let transport = incoming.next().await.unwrap().unwrap();
-        BaseChannel::with_defaults(add_compression(transport),||{})
+        BaseChannel::with_defaults(add_compression(transport), Some(|| {}))
             .execute(HelloServer.serve())
             .for_each(spawn)
             .await;
     });
 
     let transport = tcp::connect(addr, Bincode::default).await?;
-    let client = WorldClient::new(client::Config::default(), add_compression(transport), ||{}).spawn();
+    let client = WorldClient::new(
+        client::Config::default(),
+        add_compression(transport),
+        Some(|| {}),
+    )
+    .spawn();
 
     println!(
         "{}",

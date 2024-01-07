@@ -125,7 +125,7 @@ impl FakeChannel<(), ()> {
             in_flight_requests: Default::default(),
             request_cancellation,
             canceled_requests,
-            shutdown_callback:||{},
+            shutdown_callback: || {},
         }
     }
 }

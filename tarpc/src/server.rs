@@ -21,6 +21,7 @@ use futures::{
 };
 use in_flight_requests::{AlreadyExistsError, InFlightRequests};
 use pin_project::pin_project;
+use std::sync::Mutex;
 use std::{convert::TryFrom, error::Error, fmt, marker::PhantomData, pin::Pin, sync::Arc};
 use tracing::{info_span, instrument::Instrument, Span};
 
@@ -58,9 +59,14 @@ impl Default for Config {
 
 impl Config {
     /// Returns a channel backed by `transport` and configured with `self`.
-    pub fn channel<Req, Resp, T>(self, transport: T, shutdown_callback: fn() -> ()) -> BaseChannel<Req, Resp, T>
+    pub fn channel<Req, Resp, T, F>(
+        self,
+        transport: T,
+        shutdown_callback: Option<F>,
+    ) -> BaseChannel<Req, Resp, T, F>
     where
         T: Transport<Response<Resp>, ClientMessage<Req>>,
+        F: FnOnce() -> () + Send + 'static,
     {
         BaseChannel::new(self, transport, shutdown_callback)
     }
@@ -279,7 +285,7 @@ where
 /// messages. Instead, it internally handles them by cancelling corresponding requests (removing
 /// the corresponding in-flight requests and aborting their handlers).
 #[pin_project]
-pub struct BaseChannel<Req, Resp, T> {
+pub struct BaseChannel<Req, Resp, T, F: FnOnce() -> ()> {
     config: Config,
     /// Writes responses to the wire and reads requests off the wire.
     #[pin]
@@ -294,15 +300,16 @@ pub struct BaseChannel<Req, Resp, T> {
     /// Types the request and response.
     ghost: PhantomData<(fn() -> Req, fn(Resp))>,
     /// Shutdown callback
-    shutdown_callback: fn() -> (),
+    shutdown_callback: Mutex<Option<F>>,
 }
 
-impl<Req, Resp, T> BaseChannel<Req, Resp, T>
+impl<Req, Resp, T, F> BaseChannel<Req, Resp, T, F>
 where
     T: Transport<Response<Resp>, ClientMessage<Req>>,
+    F: FnOnce() -> (),
 {
     /// Creates a new channel backed by `transport` and configured with `config`.
-    pub fn new(config: Config, transport: T, shutdown_callback: fn() -> ()) -> Self {
+    pub fn new(config: Config, transport: T, shutdown_callback: Option<F>) -> Self {
         let (request_cancellation, canceled_requests) = cancellations();
         BaseChannel {
             config,
@@ -311,12 +318,12 @@ where
             request_cancellation,
             in_flight_requests: InFlightRequests::default(),
             ghost: PhantomData,
-            shutdown_callback,
+            shutdown_callback: Mutex::new(shutdown_callback),
         }
     }
 
     /// Creates a new channel backed by `transport` and configured with the defaults.
-    pub fn with_defaults(transport: T, shutdown_callback: fn() -> ()) -> Self {
+    pub fn with_defaults(transport: T, shutdown_callback: Option<F>) -> Self {
         Self::new(Config::default(), transport, shutdown_callback)
     }
 
@@ -392,7 +399,10 @@ where
     }
 }
 
-impl<Req, Resp, T> fmt::Debug for BaseChannel<Req, Resp, T> {
+impl<Req, Resp, T, F> fmt::Debug for BaseChannel<Req, Resp, T, F>
+where
+    F: FnOnce() -> () + Send + 'static,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "BaseChannel")
     }
@@ -567,9 +577,10 @@ where
     }
 }
 
-impl<Req, Resp, T> Stream for BaseChannel<Req, Resp, T>
+impl<Req, Resp, T, F> Stream for BaseChannel<Req, Resp, T, F>
 where
     T: Transport<Response<Resp>, ClientMessage<Req>>,
+    F: FnOnce() -> () + Send + 'static,
 {
     type Item = Result<TrackedRequest<Req>, ChannelError<T::Error>>;
 
@@ -674,10 +685,11 @@ where
     }
 }
 
-impl<Req, Resp, T> Sink<Response<Resp>> for BaseChannel<Req, Resp, T>
+impl<Req, Resp, T, F> Sink<Response<Resp>> for BaseChannel<Req, Resp, T, F>
 where
     T: Transport<Response<Resp>, ClientMessage<Req>>,
     T::Error: Error,
+    F: FnOnce() -> () + Send + 'static,
 {
     type Error = ChannelError<T::Error>;
 
@@ -721,15 +733,19 @@ where
     }
 }
 
-impl<Req, Resp, T> AsRef<T> for BaseChannel<Req, Resp, T> {
+impl<Req, Resp, T, F> AsRef<T> for BaseChannel<Req, Resp, T, F>
+where
+    F: FnOnce() -> () + Send + 'static,
+{
     fn as_ref(&self) -> &T {
         self.transport.get_ref()
     }
 }
 
-impl<Req, Resp, T> Channel for BaseChannel<Req, Resp, T>
+impl<Req, Resp, T, F> Channel for BaseChannel<Req, Resp, T, F>
 where
     T: Transport<Response<Resp>, ClientMessage<Req>>,
+    F: FnOnce() -> () + Send + 'static,
 {
     type Req = Req;
     type Resp = Resp;
@@ -748,7 +764,9 @@ where
     }
 
     fn shutdown_callback(&self) {
-        (self.shutdown_callback)();
+        if let Some(shutdown_callback) = self.shutdown_callback.lock().unwrap().take() {
+            shutdown_callback();
+        }
     }
 }
 
@@ -1130,49 +1148,63 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    fn test_channel<Req, Resp>() -> (
-        Pin<Box<BaseChannel<Req, Resp, UnboundedChannel<ClientMessage<Req>, Response<Resp>>>>>,
+    fn test_channel<Req, Resp, F>(
+        f: Option<F>,
+    ) -> (
+        Pin<Box<BaseChannel<Req, Resp, UnboundedChannel<ClientMessage<Req>, Response<Resp>>, F>>>,
         UnboundedChannel<Response<Resp>, ClientMessage<Req>>,
-    ) {
+    )
+    where
+        F: FnOnce() -> (),
+    {
         let (tx, rx) = crate::transport::channel::unbounded();
-        (Box::pin(BaseChannel::new(Config::default(), rx,||{})), tx)
+        (Box::pin(BaseChannel::new(Config::default(), rx, f)), tx)
     }
 
-    fn test_requests<Req, Resp>() -> (
-        Pin<
-            Box<
-                Requests<
-                    BaseChannel<Req, Resp, UnboundedChannel<ClientMessage<Req>, Response<Resp>>>,
-                >,
-            >,
-        >,
-        UnboundedChannel<Response<Resp>, ClientMessage<Req>>,
-    ) {
-        let (tx, rx) = crate::transport::channel::unbounded();
-        (
-            Box::pin(BaseChannel::new(Config::default(), rx,||{}).requests()),
-            tx,
-        )
-    }
-
-    fn test_bounded_requests<Req, Resp>(
-        capacity: usize,
+    fn test_requests<Req, Resp, F>(
+        f: Option<F>,
     ) -> (
         Pin<
             Box<
                 Requests<
-                    BaseChannel<Req, Resp, channel::Channel<ClientMessage<Req>, Response<Resp>>>,
+                    BaseChannel<Req, Resp, UnboundedChannel<ClientMessage<Req>, Response<Resp>>, F>,
+                >,
+            >,
+        >,
+        UnboundedChannel<Response<Resp>, ClientMessage<Req>>,
+    )
+    where
+        F: FnOnce() -> () + Send + 'static,
+    {
+        let (tx, rx) = crate::transport::channel::unbounded();
+        (
+            Box::pin(BaseChannel::new(Config::default(), rx, f).requests()),
+            tx,
+        )
+    }
+
+    fn test_bounded_requests<Req, Resp, F>(
+        capacity: usize,
+        f: Option<F>,
+    ) -> (
+        Pin<
+            Box<
+                Requests<
+                    BaseChannel<Req, Resp, channel::Channel<ClientMessage<Req>, Response<Resp>>, F>,
                 >,
             >,
         >,
         channel::Channel<Response<Resp>, ClientMessage<Req>>,
-    ) {
+    )
+    where
+        F: FnOnce() -> () + Send + 'static,
+    {
         let (tx, rx) = crate::transport::channel::bounded(capacity);
         // Add 1 because capacity 0 is not supported (but is supported by transport::channel::bounded).
         let config = Config {
             pending_response_buffer: capacity + 1,
         };
-        (Box::pin(BaseChannel::new(config, rx,||{}).requests()), tx)
+        (Box::pin(BaseChannel::new(config, rx, f).requests()), tx)
     }
 
     fn fake_request<Req>(req: Req) -> ClientMessage<Req> {
@@ -1274,7 +1306,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_start_send_duplicate_request_returns_error() {
-        let (mut channel, _tx) = test_channel::<(), ()>();
+        let (mut channel, _tx) = test_channel::<(), (), _>(Some(|| {}));
 
         channel
             .as_mut()
@@ -1296,7 +1328,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_poll_next_aborts_multiple_requests() {
-        let (mut channel, _tx) = test_channel::<(), ()>();
+        let (mut channel, _tx) = test_channel::<(), (), _>(Some(|| {}));
 
         tokio::time::pause();
         let req0 = channel
@@ -1327,7 +1359,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_poll_next_aborts_canceled_request() {
-        let (mut channel, mut tx) = test_channel::<(), ()>();
+        let (mut channel, mut tx) = test_channel::<(), (), _>(Some(|| {}));
 
         tokio::time::pause();
         let req = channel
@@ -1356,7 +1388,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_with_closed_transport_and_in_flight_request_returns_pending() {
-        let (mut channel, tx) = test_channel::<(), ()>();
+        let (mut channel, tx) = test_channel::<(), (), _>(Some(|| {}));
 
         tokio::time::pause();
         let _abort_registration = channel
@@ -1377,7 +1409,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_with_closed_transport_and_no_in_flight_requests_returns_closed() {
-        let (mut channel, tx) = test_channel::<(), ()>();
+        let (mut channel, tx) = test_channel::<(), (), _>(Some(|| {}));
         drop(tx);
         assert_matches!(
             channel.as_mut().poll_next(&mut noop_context()),
@@ -1387,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_poll_next_yields_request() {
-        let (mut channel, mut tx) = test_channel::<(), ()>();
+        let (mut channel, mut tx) = test_channel::<(), (), _>(Some(|| {}));
         tx.send(fake_request(())).await.unwrap();
 
         assert_matches!(
@@ -1398,7 +1430,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_poll_next_aborts_request_and_yields_request() {
-        let (mut channel, mut tx) = test_channel::<(), ()>();
+        let (mut channel, mut tx) = test_channel::<(), (), _>(Some(|| {}));
 
         tokio::time::pause();
         let req = channel
@@ -1422,7 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_channel_start_send_removes_in_flight_request() {
-        let (mut channel, _tx) = test_channel::<(), ()>();
+        let (mut channel, _tx) = test_channel::<(), (), _>(Some(|| {}));
 
         channel
             .as_mut()
@@ -1445,7 +1477,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_request_drop_cancels_request() {
-        let (mut requests, mut tx) = test_requests::<(), ()>();
+        let (mut requests, mut tx) = test_requests::<(), (), _>(Some(|| {}));
         tx.send(fake_request(())).await.unwrap();
 
         let request = match requests.as_mut().poll_next(&mut noop_context()) {
@@ -1465,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_requests_successful_execute_doesnt_cancel_request() {
-        let (mut requests, mut tx) = test_requests::<(), ()>();
+        let (mut requests, mut tx) = test_requests::<(), (), _>(Some(|| {}));
         tx.send(fake_request(())).await.unwrap();
 
         let request = match requests.as_mut().poll_next(&mut noop_context()) {
@@ -1483,7 +1515,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_poll_next_response_returns_pending_when_buffer_full() {
-        let (mut requests, _tx) = test_bounded_requests::<(), ()>(0);
+        let (mut requests, _tx) = test_bounded_requests::<(), (), _>(0, Some(|| {}));
 
         // Response written to the transport.
         requests
@@ -1534,7 +1566,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_pump_write_returns_pending_when_buffer_full() {
-        let (mut requests, _tx) = test_bounded_requests::<(), ()>(0);
+        let (mut requests, _tx) = test_bounded_requests::<(), (), _>(0, Some(|| {}));
 
         // Response written to the transport.
         requests
@@ -1589,7 +1621,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_pump_read() {
-        let (mut requests, mut tx) = test_requests::<(), ()>();
+        let (mut requests, mut tx) = test_requests::<(), (), _>(Some(|| {}));
 
         // Response written to the transport.
         tx.send(fake_request(())).await.unwrap();

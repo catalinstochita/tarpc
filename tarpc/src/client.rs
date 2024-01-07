@@ -16,6 +16,7 @@ use crate::{
 use futures::{prelude::*, ready, stream::Fuse, task::*};
 use in_flight_requests::InFlightRequests;
 use pin_project::pin_project;
+use std::sync::Mutex;
 use std::{
     convert::TryFrom,
     fmt,
@@ -232,13 +233,14 @@ impl<Resp> Drop for ResponseGuard<'_, Resp> {
 
 /// Returns a channel and dispatcher that manages the lifecycle of requests initiated by the
 /// channel.
-pub fn new<Req, Resp, C>(
+pub fn new<Req, Resp, C, F>(
     config: Config,
     transport: C,
-    shutdown_callback: fn() -> (),
-) -> NewClient<Channel<Req, Resp>, RequestDispatch<Req, Resp, C>>
+    shutdown_callback: Arc<Mutex<Option<F>>>,
+) -> NewClient<Channel<Req, Resp>, RequestDispatch<Req, Resp, C, F>>
 where
     C: Transport<ClientMessage<Req>, Response<Resp>>,
+    F: FnOnce() -> () + Send + 'static,
 {
     let (to_dispatch, pending_requests) = mpsc::channel(config.pending_request_buffer);
     let (cancellation, canceled_requests) = cancellations();
@@ -265,7 +267,7 @@ where
 #[must_use]
 #[pin_project]
 #[derive(Debug)]
-pub struct RequestDispatch<Req, Resp, C> {
+pub struct RequestDispatch<Req, Resp, C, F: FnOnce() -> ()> {
     /// Writes requests to the wire and reads responses off the wire.
     #[pin]
     transport: Fuse<C>,
@@ -277,12 +279,13 @@ pub struct RequestDispatch<Req, Resp, C> {
     in_flight_requests: InFlightRequests<Result<Resp, RpcError>>,
     /// Configures limits to prevent unlimited resource usage.
     config: Config,
-    shutdown_callback: fn() -> (),
+    shutdown_callback: Arc<Mutex<Option<F>>>,
 }
 
-impl<Req, Resp, C> RequestDispatch<Req, Resp, C>
+impl<Req, Resp, C, F> RequestDispatch<Req, Resp, C, F>
 where
     C: Transport<ClientMessage<Req>, Response<Resp>>,
+    F: FnOnce() -> (),
 {
     fn in_flight_requests<'a>(
         self: &'a mut Pin<&mut Self>,
@@ -558,9 +561,10 @@ where
     }
 }
 
-impl<Req, Resp, C> Future for RequestDispatch<Req, Resp, C>
+impl<Req, Resp, C, F> Future for RequestDispatch<Req, Resp, C, F>
 where
     C: Transport<ClientMessage<Req>, Response<Resp>>,
+    F: FnOnce() -> (),
 {
     type Output = Result<(), ChannelError<C::Error>>;
 
@@ -572,7 +576,9 @@ where
             match (self.as_mut().pump_read(cx)?, self.as_mut().pump_write(cx)?) {
                 (Poll::Ready(None), _) => {
                     tracing::info!("Shutdown: read half closed, so shutting down.");
-                    (self.shutdown_callback)();
+                    if let Some(shutdown_callback) = self.shutdown_callback.lock().unwrap().take() {
+                        shutdown_callback();
+                    }
                     return Poll::Ready(Ok(()));
                 }
                 (read, Poll::Ready(None)) => {
@@ -622,6 +628,7 @@ mod tests {
     };
     use assert_matches::assert_matches;
     use futures::{prelude::*, task::*};
+    use std::sync::Mutex;
     use std::{
         convert::TryFrom,
         fmt::Display,
@@ -641,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn response_completes_request_future() {
-        let (mut dispatch, mut _channel, mut server_channel) = set_up();
+        let (mut dispatch, mut _channel, mut server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -701,7 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn stage_request() {
-        let (mut dispatch, mut channel, _server_channel) = set_up();
+        let (mut dispatch, mut channel, _server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -719,7 +726,7 @@ mod tests {
     // Regression test for  https://github.com/google/tarpc/issues/220
     #[tokio::test]
     async fn stage_request_channel_dropped_doesnt_panic() {
-        let (mut dispatch, mut channel, mut server_channel) = set_up();
+        let (mut dispatch, mut channel, mut server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -741,7 +748,7 @@ mod tests {
     #[allow(unstable_name_collisions)]
     #[tokio::test]
     async fn stage_request_response_future_dropped_is_canceled_before_sending() {
-        let (mut dispatch, mut channel, _server_channel) = set_up();
+        let (mut dispatch, mut channel, _server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -757,7 +764,7 @@ mod tests {
     #[allow(unstable_name_collisions)]
     #[tokio::test]
     async fn stage_request_response_future_dropped_is_canceled_after_sending() {
-        let (mut dispatch, mut channel, _server_channel) = set_up();
+        let (mut dispatch, mut channel, _server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -778,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn stage_request_response_closed_skipped() {
-        let (mut dispatch, mut channel, _server_channel) = set_up();
+        let (mut dispatch, mut channel, _server_channel) = set_up(|| {});
         let cx = &mut Context::from_waker(noop_waker_ref());
         let (tx, mut rx) = oneshot::channel();
 
@@ -794,14 +801,14 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_error() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let (dispatch, mut channel, _) = set_up();
+        let (dispatch, mut channel, _) = set_up(|| {});
         let (tx, mut rx) = oneshot::channel();
         // send succeeds
         let resp = send_request(&mut channel, "hi", tx, &mut rx).await;
         drop(dispatch);
         // error on receive
         assert_matches!(resp.response().await, Err(RpcError::Shutdown));
-        let (dispatch, channel, _) = set_up();
+        let (dispatch, channel, _) = set_up(|| {});
         drop(dispatch);
         // error on send
         let resp = channel
@@ -813,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_error_write() {
         let cause = TransportError::Write;
-        let (mut dispatch, mut channel, mut cx) = setup_always_err(cause);
+        let (mut dispatch, mut channel, mut cx) = setup_always_err(cause, || {});
         let (tx, mut rx) = oneshot::channel();
 
         let resp = send_request(&mut channel, "hi", tx, &mut rx).await;
@@ -839,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_error_read() {
         let cause = TransportError::Read;
-        let (mut dispatch, mut channel, mut cx) = setup_always_err(cause);
+        let (mut dispatch, mut channel, mut cx) = setup_always_err(cause, || {});
         let (tx, mut rx) = oneshot::channel();
         let resp = send_request(&mut channel, "hi", tx, &mut rx).await;
         assert_eq!(
@@ -856,7 +863,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_error_ready() {
         let cause = TransportError::Ready;
-        let (mut dispatch, _, mut cx) = setup_always_err(cause);
+        let (mut dispatch, _, mut cx) = setup_always_err(cause, || {});
         assert_eq!(
             dispatch.as_mut().poll(&mut cx),
             Poll::Ready(Err(ChannelError::Ready(cause)))
@@ -866,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_error_flush() {
         let cause = TransportError::Flush;
-        let (mut dispatch, _, mut cx) = setup_always_err(cause);
+        let (mut dispatch, _, mut cx) = setup_always_err(cause, || {});
         assert_eq!(
             dispatch.as_mut().poll(&mut cx),
             Poll::Ready(Err(ChannelError::Flush(cause)))
@@ -876,7 +883,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_error_close() {
         let cause = TransportError::Close;
-        let (mut dispatch, channel, mut cx) = setup_always_err(cause);
+        let (mut dispatch, channel, mut cx) = setup_always_err(cause, || {});
         drop(channel);
         assert_eq!(
             dispatch.as_mut().poll(&mut cx),
@@ -884,23 +891,27 @@ mod tests {
         );
     }
 
-    fn setup_always_err(
+    fn setup_always_err<F>(
         cause: TransportError,
+        shutdown_callback: F,
     ) -> (
-        Pin<Box<RequestDispatch<String, String, AlwaysErrorTransport<String>>>>,
+        Pin<Box<RequestDispatch<String, String, AlwaysErrorTransport<String>, F>>>,
         Channel<String, String>,
         Context<'static>,
-    ) {
+    )
+    where
+        F: FnOnce() -> () + Send + 'static,
+    {
         let (to_dispatch, pending_requests) = mpsc::channel(1);
         let (cancellation, canceled_requests) = cancellations();
         let transport: AlwaysErrorTransport<String> = AlwaysErrorTransport(cause, PhantomData);
-        let dispatch = Box::pin(RequestDispatch::<String, String, _> {
+        let dispatch = Box::pin(RequestDispatch::<String, String, _, _> {
             transport: transport.fuse(),
             pending_requests,
             canceled_requests,
             in_flight_requests: InFlightRequests::default(),
             config: Config::default(),
-            shutdown_callback: ||{},
+            shutdown_callback: Arc::new(Mutex::new(Some(shutdown_callback))),
         });
         let channel = Channel {
             to_dispatch,
@@ -971,32 +982,38 @@ mod tests {
         }
     }
 
-    fn set_up() -> (
+    fn set_up<F>(
+        shutdown_callback: F,
+    ) -> (
         Pin<
             Box<
                 RequestDispatch<
                     String,
                     String,
                     UnboundedChannel<Response<String>, ClientMessage<String>>,
+                    F,
                 >,
             >,
         >,
         Channel<String, String>,
         UnboundedChannel<ClientMessage<String>, Response<String>>,
-    ) {
+    )
+    where
+        F: FnOnce() -> (),
+    {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         let (to_dispatch, pending_requests) = mpsc::channel(1);
         let (cancellation, canceled_requests) = cancellations();
         let (client_channel, server_channel) = transport::channel::unbounded();
 
-        let dispatch = RequestDispatch::<String, String, _> {
+        let dispatch = RequestDispatch::<String, String, _, _> {
             transport: client_channel.fuse(),
             pending_requests,
             canceled_requests,
             in_flight_requests: InFlightRequests::default(),
             config: Config::default(),
-            shutdown_callback: ||{},
+            shutdown_callback: Arc::new(Mutex::new(Some(shutdown_callback))),
         };
 
         let channel = Channel {
