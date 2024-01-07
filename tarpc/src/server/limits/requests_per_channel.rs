@@ -197,7 +197,7 @@ mod tests {
     async fn throttler_in_flight_requests() {
         let throttler = MaxRequests {
             max_in_flight_requests: 0,
-            inner: FakeChannel::default::<isize, isize>(),
+            inner: FakeChannel::default::<isize, isize>(|| {}),
         };
 
         pin_mut!(throttler);
@@ -219,7 +219,7 @@ mod tests {
     fn throttler_poll_next_done() {
         let throttler = MaxRequests {
             max_in_flight_requests: 0,
-            inner: FakeChannel::default::<isize, isize>(),
+            inner: FakeChannel::default::<isize, isize>(|| {}),
         };
 
         pin_mut!(throttler);
@@ -230,7 +230,7 @@ mod tests {
     fn throttler_poll_next_some() -> io::Result<()> {
         let throttler = MaxRequests {
             max_in_flight_requests: 1,
-            inner: FakeChannel::default::<isize, isize>(),
+            inner: FakeChannel::default::<isize, isize>(|| {}),
         };
 
         pin_mut!(throttler);
@@ -250,7 +250,7 @@ mod tests {
     fn throttler_poll_next_throttled() {
         let throttler = MaxRequests {
             max_in_flight_requests: 0,
-            inner: FakeChannel::default::<isize, isize>(),
+            inner: FakeChannel::default::<isize, isize>(|| {}),
         };
 
         pin_mut!(throttler);
@@ -325,7 +325,7 @@ mod tests {
     async fn throttler_start_send() {
         let throttler = MaxRequests {
             max_in_flight_requests: 0,
-            inner: FakeChannel::default::<isize, isize>(),
+            inner: FakeChannel::default::<isize, isize>(|| {}),
         };
 
         pin_mut!(throttler);

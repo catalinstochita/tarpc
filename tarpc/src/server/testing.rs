@@ -12,11 +12,12 @@ use crate::{
 };
 use futures::{task::*, Sink, Stream};
 use pin_project::pin_project;
+use std::sync::Mutex;
 use std::{collections::VecDeque, io, pin::Pin, time::SystemTime};
 use tracing::Span;
 
 #[pin_project]
-pub(crate) struct FakeChannel<In, Out> {
+pub(crate) struct FakeChannel<In, Out, F: FnOnce() -> ()> {
     #[pin]
     pub stream: VecDeque<In>,
     #[pin]
@@ -25,12 +26,13 @@ pub(crate) struct FakeChannel<In, Out> {
     pub in_flight_requests: super::in_flight_requests::InFlightRequests,
     pub request_cancellation: RequestCancellation,
     pub canceled_requests: CanceledRequests,
-    pub shutdown_callback: fn() -> (),
+    pub shutdown_callback: Mutex<Option<F>>,
 }
 
-impl<In, Out> Stream for FakeChannel<In, Out>
+impl<In, Out, F> Stream for FakeChannel<In, Out, F>
 where
     In: Unpin,
+    F: FnOnce() -> (),
 {
     type Item = In;
 
@@ -39,7 +41,10 @@ where
     }
 }
 
-impl<In, Resp> Sink<Response<Resp>> for FakeChannel<In, Response<Resp>> {
+impl<In, Resp, F> Sink<Response<Resp>> for FakeChannel<In, Response<Resp>, F>
+where
+    F: FnOnce() -> (),
+{
     type Error = io::Error;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
@@ -66,9 +71,10 @@ impl<In, Resp> Sink<Response<Resp>> for FakeChannel<In, Response<Resp>> {
     }
 }
 
-impl<Req, Resp> Channel for FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>>
+impl<Req, Resp, F> Channel for FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>, F>
 where
     Req: Unpin,
+    F: FnOnce() -> (),
 {
     type Req = Req;
     type Resp = Resp;
@@ -87,11 +93,14 @@ where
     }
 
     fn shutdown_callback(&self) {
-        (self.shutdown_callback)();
+        self.shutdown_callback.lock().unwrap().take().unwrap()();
     }
 }
 
-impl<Req, Resp> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>> {
+impl<Req, Resp, F> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>, F>
+where
+    F: FnOnce() -> (),
+{
     pub fn push_req(&mut self, id: u64, message: Req) {
         let (_, abort_registration) = futures::future::AbortHandle::new_pair();
         let (request_cancellation, _) = cancellations();
@@ -115,8 +124,13 @@ impl<Req, Resp> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>> {
     }
 }
 
-impl FakeChannel<(), ()> {
-    pub fn default<Req, Resp>() -> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>> {
+impl<F> FakeChannel<(), (), F>
+where
+    F: FnOnce() -> (),
+{
+    pub fn default<Req, Resp>(
+        shutdown_callback: F,
+    ) -> FakeChannel<io::Result<TrackedRequest<Req>>, Response<Resp>, F> {
         let (request_cancellation, canceled_requests) = cancellations();
         FakeChannel {
             stream: Default::default(),
@@ -125,7 +139,7 @@ impl FakeChannel<(), ()> {
             in_flight_requests: Default::default(),
             request_cancellation,
             canceled_requests,
-            shutdown_callback: || {},
+            shutdown_callback: Mutex::new(Some(shutdown_callback)),
         }
     }
 }
